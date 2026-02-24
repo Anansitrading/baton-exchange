@@ -54,30 +54,48 @@ def _make_bar(used_pct: int, width: int = 10) -> str:
 
 
 def _claude_context_line(remaining_pct: float | None) -> str:
-    """Build Claude context bar: Claude ████████░░ 70% →80%"""
+    """Build Claude context bar with real %, handoff marker at 80%.
+
+    No scaling — bar fills proportionally to actual context usage.
+    At 80% used (20% remaining), auto-compact fires and baton exchange happens.
+    """
     if remaining_pct is None:
         return ""
 
     rem = round(remaining_pct)
-    raw_used = max(0, min(100, 100 - rem))
-    # Scale to 80% limit (auto-compact fires at ~20% remaining)
-    used = min(100, round((raw_used / 80) * 100))
+    used = max(0, min(100, 100 - rem))
 
-    bar = _make_bar(used)
+    # 10-block bar — 8 blocks = 80% = handoff threshold
+    filled = max(0, min(10, used * 10 // 100))
+    # Build bar with handoff marker at position 8 (80%)
+    blocks = []
+    for i in range(10):
+        if i < filled:
+            blocks.append("\u2588")
+        elif i == 8:
+            # Handoff position marker (80%) — show as distinct char when unfilled
+            blocks.append("\u2595")
+        else:
+            blocks.append("\u2591")
+    bar = "".join(blocks)
 
-    if used < 63:
+    if used < 50:
         bar_color = GREEN
-    elif used < 81:
+    elif used < 70:
         bar_color = YELLOW
-    elif used < 95:
+    elif used < 80:
         bar_color = ORANGE
     else:
         bar_color = BLINK_RED
         bar = f"\U0001f480 {bar}"
 
-    handoff = f"{DIM}\u2192{RESET}{BOLD_RED}{HANDOFF_THRESHOLD}%{RESET}"
+    # Show handoff label
+    if used < 80:
+        handoff = f" {DIM}baton\u2192{RESET}{BOLD_RED}80%{RESET}"
+    else:
+        handoff = f" {BOLD_RED}\u26A1 BATON EXCHANGE{RESET}"
 
-    return f"{DIM}Claude{RESET} {bar_color}{bar}{RESET} {RED}{used}%{RESET} {handoff}"
+    return f"{DIM}Claude{RESET} {bar_color}{bar}{RESET} {RED}{used}%{RESET}{handoff}"
 
 
 def _hypervisa_context_line() -> str:
