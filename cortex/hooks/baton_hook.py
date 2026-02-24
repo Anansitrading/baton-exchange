@@ -79,6 +79,34 @@ def _write_inject_state(project: str, success: bool, chars: int = 0) -> None:
         logger.warning(f"Failed to write inject state: {e}")
 
 
+def _cache_hypervisa_stats() -> None:
+    """Query HyperVisa sessions API and cache token stats for statusline."""
+    try:
+        import urllib.request
+
+        req = urllib.request.Request(
+            f"{HYPERVISA_API}/sessions",
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            if resp.status == 200:
+                sessions = json.loads(resp.read())
+                total_tokens = sum(s.get("total_tokens", 0) for s in sessions)
+                active = sum(1 for s in sessions if s.get("status") == "active")
+                BATON_STATE_DIR.mkdir(parents=True, exist_ok=True)
+                stats_path = BATON_STATE_DIR / "hypervisa-stats.json"
+                stats_path.write_text(json.dumps({
+                    "total_tokens": total_tokens,
+                    "session_count": len(sessions),
+                    "active_sessions": active,
+                    "context_limit": 1_000_000,
+                    "timestamp": __import__("time").time(),
+                }))
+                logger.info(f"HyperVisa stats cached: {total_tokens} tokens, {active} active")
+    except Exception as e:
+        logger.warning(f"Failed to cache HyperVisa stats: {e}")
+
+
 def _call_baton_api(project: str, session_id: str, cwd: str) -> dict | None:
     """Call HyperVisa baton synthesis endpoint."""
     try:
@@ -184,8 +212,9 @@ def main():
 
     logger.info(f"Baton relay for project: {project}")
 
-    # Call HyperVisa
+    # Call HyperVisa + cache its context stats
     baton = _call_baton_api(project, session_id, cwd)
+    _cache_hypervisa_stats()
 
     if not baton or "error" in baton:
         logger.info(f"No baton available: {baton.get('error', 'API unreachable') if baton else 'unreachable'}")

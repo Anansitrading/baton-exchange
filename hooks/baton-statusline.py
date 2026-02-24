@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Baton Relay Statusline for Claude Code.
 
-Shows: model | baton status + learnings | dir | context% → handoff%
+Shows: model | baton status | dir
+       Claude ctx bar  HyperVisa ctx bar
+       session learnings
+
 Reads baton state from ~/.cortex/baton/.
 """
 
@@ -25,10 +28,13 @@ CYAN = "\033[36m"
 MAGENTA = "\033[35m"
 WHITE = "\033[37m"
 DIM_WHITE = "\033[2;37m"
+BLUE = "\033[34m"
+BOLD_CYAN = "\033[1;36m"
 
 BATON_DIR = Path.home() / ".cortex" / "baton"
 BATON_REGISTRY = BATON_DIR / "project-contexts.json"
 BATON_LAST_INJECT = BATON_DIR / "last-inject.json"
+HYPERVISA_STATS = BATON_DIR / "hypervisa-stats.json"
 
 # Handoff fires at 80% used (20% remaining). Show marker at that point.
 HANDOFF_THRESHOLD = 80
@@ -41,8 +47,14 @@ def _read_json(path: Path) -> dict:
         return {}
 
 
-def _context_segment(remaining_pct: float | None) -> str:
-    """Build context % in red + handoff marker."""
+def _make_bar(used_pct: int, width: int = 10) -> str:
+    """Build a block bar: ████░░░░░░"""
+    filled = max(0, min(width, used_pct * width // 100))
+    return "\u2588" * filled + "\u2591" * (width - filled)
+
+
+def _claude_context_line(remaining_pct: float | None) -> str:
+    """Build Claude context bar: Claude ████████░░ 70% →80%"""
     if remaining_pct is None:
         return ""
 
@@ -51,11 +63,8 @@ def _context_segment(remaining_pct: float | None) -> str:
     # Scale to 80% limit (auto-compact fires at ~20% remaining)
     used = min(100, round((raw_used / 80) * 100))
 
-    # Bar
-    filled = used // 10
-    bar = "\u2588" * filled + "\u2591" * (10 - filled)
+    bar = _make_bar(used)
 
-    # Context % always in red
     if used < 63:
         bar_color = GREEN
     elif used < 81:
@@ -66,10 +75,52 @@ def _context_segment(remaining_pct: float | None) -> str:
         bar_color = BLINK_RED
         bar = f"\U0001f480 {bar}"
 
-    # Handoff marker — show where auto-compact fires
-    handoff_str = f" {DIM}\u2192{RESET}{BOLD_RED}{HANDOFF_THRESHOLD}%{RESET}"
+    handoff = f"{DIM}\u2192{RESET}{BOLD_RED}{HANDOFF_THRESHOLD}%{RESET}"
 
-    return f" {bar_color}{bar}{RESET} {RED}{used}%{RESET}{handoff_str}"
+    return f"{DIM}Claude{RESET} {bar_color}{bar}{RESET} {RED}{used}%{RESET} {handoff}"
+
+
+def _hypervisa_context_line() -> str:
+    """Build HyperVisa context bar: HV ████░░░░░░ 42% 421K/1M"""
+    stats = _read_json(HYPERVISA_STATS)
+    if not stats:
+        return ""
+
+    total = stats.get("total_tokens", 0)
+    limit = stats.get("context_limit", 1_000_000)
+    active = stats.get("active_sessions", 0)
+
+    if limit <= 0:
+        return ""
+
+    used_pct = min(100, round(total / limit * 100))
+    bar = _make_bar(used_pct)
+
+    # Color based on utilization
+    if used_pct < 50:
+        bar_color = CYAN
+    elif used_pct < 75:
+        bar_color = BLUE
+    elif used_pct < 90:
+        bar_color = YELLOW
+    else:
+        bar_color = ORANGE
+
+    # Format token count: 421K, 1.2M, etc.
+    if total >= 1_000_000:
+        tok_str = f"{total / 1_000_000:.1f}M"
+    elif total >= 1_000:
+        tok_str = f"{total // 1_000}K"
+    else:
+        tok_str = str(total)
+
+    limit_str = f"{limit // 1_000_000}M" if limit >= 1_000_000 else f"{limit // 1_000}K"
+
+    return (
+        f"{BOLD_CYAN}HV{RESET} {bar_color}{bar}{RESET} "
+        f"{CYAN}{used_pct}%{RESET} {DIM}{tok_str}/{limit_str} "
+        f"({active} sessions){RESET}"
+    )
 
 
 def _detect_project(cwd: str, projects: dict) -> tuple[str | None, dict | None]:
@@ -108,8 +159,6 @@ def _baton_segment(cwd: str) -> tuple[str, list[str]]:
     project_name, project_entry = _detect_project(cwd, projects)
 
     # Fallback: if cwd doesn't match a known project, use the last injected project.
-    # The hook fires at session start in the original cwd — if the user cd's elsewhere
-    # during the session, we still show that session's baton.
     if not project_entry:
         last_inject = _read_json(BATON_LAST_INJECT)
         fallback_project = last_inject.get("project", "")
@@ -117,7 +166,6 @@ def _baton_segment(cwd: str) -> tuple[str, list[str]]:
             project_name = fallback_project
             project_entry = projects[fallback_project]
         else:
-            # Try the global last-baton.json
             global_baton = _read_json(BATON_DIR / "last-baton.json")
             gp = global_baton.get("project", "")
             if gp and gp in projects:
@@ -255,23 +303,32 @@ def main():
     # Build segments
     baton, learnings = _baton_segment(cwd)
     task = _current_task(session_id)
-    ctx = _context_segment(remaining)
 
-    # Line 1: model | baton | [task |] dir  context% → handoff%
-    parts = [f"{DIM}{model}{RESET}"]
-    parts.append(baton)
+    # Line 1: model | baton | [task |] dir
+    header_parts = [f"{DIM}{model}{RESET}"]
+    header_parts.append(baton)
     if task:
-        parts.append(f"{BOLD}{task}{RESET}")
-    parts.append(f"{DIM}{dirname}{RESET}")
+        header_parts.append(f"{BOLD}{task}{RESET}")
+    header_parts.append(f"{DIM}{dirname}{RESET}")
 
-    line = " \u2502 ".join(parts)
-    line += ctx
+    line = " \u2502 ".join(header_parts)
 
-    # Append learnings as compact summary after newline
+    # Line 2: dual context bars — Claude + HyperVisa side by side
+    claude_bar = _claude_context_line(remaining)
+    hv_bar = _hypervisa_context_line()
+
+    if claude_bar or hv_bar:
+        ctx_parts = []
+        if claude_bar:
+            ctx_parts.append(claude_bar)
+        if hv_bar:
+            ctx_parts.append(hv_bar)
+        line += "\n  " + "  \u2502  ".join(ctx_parts)
+
+    # Append learnings as compact summary
     if learnings:
         line += f"\n{DIM}\u2500\u2500 session learnings \u2500\u2500{RESET}"
         for item in learnings[:5]:
-            # Truncate each learning to fit terminal width (~80 chars minus prefix)
             display = item if len(item) < 75 else item[:72] + "\u2026"
             line += f"\n  {display}"
 
