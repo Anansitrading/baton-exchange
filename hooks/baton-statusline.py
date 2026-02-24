@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
-"""Baton Exchange — Claude Code Statusline.
+"""Baton Relay Statusline for Claude Code.
 
-Renders baton telemetry in the Claude Code terminal footer:
-  model | baton status + learnings | dir | context% → handoff%
-
-Reads baton state from BATON_STATE_DIR (default: ~/.cortex/baton/).
+Shows: model | baton status + learnings | dir | context% → handoff%
+Reads baton state from ~/.cortex/baton/.
 """
 
 import json
@@ -28,10 +26,12 @@ MAGENTA = "\033[35m"
 WHITE = "\033[37m"
 DIM_WHITE = "\033[2;37m"
 
-BATON_DIR = Path(os.environ.get("BATON_STATE_DIR", Path.home() / ".cortex" / "baton"))
+BATON_DIR = Path.home() / ".cortex" / "baton"
 BATON_REGISTRY = BATON_DIR / "project-contexts.json"
 BATON_LAST_INJECT = BATON_DIR / "last-inject.json"
-HANDOFF_THRESHOLD = int(os.environ.get("BATON_HANDOFF_PCT", "80"))
+
+# Handoff fires at 80% used (20% remaining). Show marker at that point.
+HANDOFF_THRESHOLD = 80
 
 
 def _read_json(path: Path) -> dict:
@@ -48,11 +48,14 @@ def _context_segment(remaining_pct: float | None) -> str:
 
     rem = round(remaining_pct)
     raw_used = max(0, min(100, 100 - rem))
-    used = min(100, round((raw_used / HANDOFF_THRESHOLD) * 100))
+    # Scale to 80% limit (auto-compact fires at ~20% remaining)
+    used = min(100, round((raw_used / 80) * 100))
 
+    # Bar
     filled = used // 10
     bar = "\u2588" * filled + "\u2591" * (10 - filled)
 
+    # Context % always in red
     if used < 63:
         bar_color = GREEN
     elif used < 81:
@@ -63,12 +66,15 @@ def _context_segment(remaining_pct: float | None) -> str:
         bar_color = BLINK_RED
         bar = f"\U0001f480 {bar}"
 
+    # Handoff marker — show where auto-compact fires
     handoff_str = f" {DIM}\u2192{RESET}{BOLD_RED}{HANDOFF_THRESHOLD}%{RESET}"
+
     return f" {bar_color}{bar}{RESET} {RED}{used}%{RESET}{handoff_str}"
 
 
 def _detect_project(cwd: str, projects: dict) -> tuple[str | None, dict | None]:
     """Find current project from git remote or dirname."""
+    # Try git remote
     try:
         import subprocess
         import re
@@ -86,6 +92,7 @@ def _detect_project(cwd: str, projects: dict) -> tuple[str | None, dict | None]:
     except Exception:
         pass
 
+    # Fallback to dirname
     dirname = Path(cwd).name
     if dirname in projects:
         return dirname, projects[dirname]
@@ -94,11 +101,28 @@ def _detect_project(cwd: str, projects: dict) -> tuple[str | None, dict | None]:
 
 
 def _baton_segment(cwd: str) -> tuple[str, list[str]]:
-    """Build baton status segment + learnings list."""
+    """Build baton status segment + learnings list. Returns (segment, learnings)."""
     registry = _read_json(BATON_REGISTRY)
     projects = registry.get("projects", {})
 
     project_name, project_entry = _detect_project(cwd, projects)
+
+    # Fallback: if cwd doesn't match a known project, use the last injected project.
+    # The hook fires at session start in the original cwd — if the user cd's elsewhere
+    # during the session, we still show that session's baton.
+    if not project_entry:
+        last_inject = _read_json(BATON_LAST_INJECT)
+        fallback_project = last_inject.get("project", "")
+        if fallback_project and fallback_project in projects:
+            project_name = fallback_project
+            project_entry = projects[fallback_project]
+        else:
+            # Try the global last-baton.json
+            global_baton = _read_json(BATON_DIR / "last-baton.json")
+            gp = global_baton.get("project", "")
+            if gp and gp in projects:
+                project_name = gp
+                project_entry = projects[gp]
 
     if not project_entry:
         return f"{DIM_WHITE}\u2300 no baton{RESET}", []
@@ -144,7 +168,7 @@ def _baton_segment(cwd: str) -> tuple[str, list[str]]:
         decisions = steering.get("decisions_made", [])
         constraints = steering.get("constraints", [])
 
-        # Build learnings list
+        # Build learnings list from gotchas + decisions + constraints
         for g in gotchas[:3]:
             learnings.append(f"{YELLOW}\u26A0{RESET} {g}")
         for d in decisions[:2]:
@@ -152,6 +176,7 @@ def _baton_segment(cwd: str) -> tuple[str, list[str]]:
         for c in constraints[:2]:
             learnings.append(f"{RED}\u2297{RESET} {c}")
 
+        # Add persistence info
         persistence = baton_data.get("persistence", {})
         in_progress = persistence.get("in_progress", "")
         if in_progress:
@@ -162,7 +187,8 @@ def _baton_segment(cwd: str) -> tuple[str, list[str]]:
             last = completed[-1] if completed else ""
             learnings.append(f"{DIM}\u2714 {count} done (last: {last[:30]}){RESET}")
 
-    parts = [f"{CYAN}\u26A1{RESET}"]
+    parts = []
+    parts.append(f"{CYAN}\u26A1{RESET}")
 
     if mode:
         mode_colors = {
@@ -188,7 +214,7 @@ def _baton_segment(cwd: str) -> tuple[str, list[str]]:
 
 
 def _current_task(session_id: str) -> str:
-    """Get current in-progress task from Claude Code todos."""
+    """Get current in-progress task from todos."""
     if not session_id:
         return ""
 
@@ -226,10 +252,12 @@ def main():
 
     dirname = Path(cwd).name
 
+    # Build segments
     baton, learnings = _baton_segment(cwd)
     task = _current_task(session_id)
     ctx = _context_segment(remaining)
 
+    # Line 1: model | baton | [task |] dir  context% → handoff%
     parts = [f"{DIM}{model}{RESET}"]
     parts.append(baton)
     if task:
@@ -239,9 +267,11 @@ def main():
     line = " \u2502 ".join(parts)
     line += ctx
 
+    # Append learnings as compact summary after newline
     if learnings:
         line += f"\n{DIM}\u2500\u2500 session learnings \u2500\u2500{RESET}"
         for item in learnings[:5]:
+            # Truncate each learning to fit terminal width (~80 chars minus prefix)
             display = item if len(item) < 75 else item[:72] + "\u2026"
             line += f"\n  {display}"
 
