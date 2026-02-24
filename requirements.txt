@@ -1,0 +1,12 @@
+# Baton Exchange — Python dependencies
+#
+# Core (required for cxdb client)
+blake3>=0.4.0
+httpx>=0.24.0
+msgpack>=1.0.0
+
+# HyperVisa baton synthesis (required for Gemini-powered batons)
+google-genai>=1.0.0
+
+# Cortex DuckDB ingestion (optional — for full compact hook)
+duckdb>=1.0.0

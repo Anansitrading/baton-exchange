@@ -1,0 +1,57 @@
+{
+  "purpose": "Build authentication system with JWT refresh token rotation",
+  "persistence": {
+    "last_session": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "completed": [
+      "User model and migration",
+      "Login endpoint with bcrypt",
+      "JWT access token generation"
+    ],
+    "in_progress": "Implementing refresh token rotation",
+    "next": [
+      "Add token revocation on logout",
+      "Rate limit login attempts",
+      "Write integration tests"
+    ],
+    "files_touched": [
+      "src/auth/tokens.py",
+      "src/auth/routes.py",
+      "src/models/user.py",
+      "tests/test_auth.py"
+    ]
+  },
+  "steering": {
+    "mode": "implement",
+    "gotchas": [
+      "Redis session store requires decode_responses=True or bytes comparison fails silently",
+      "PyJWT 2.x changed encode() to return str not bytes — don't call .decode()",
+      "Refresh tokens must be single-use: rotate on every refresh, revoke the old one"
+    ],
+    "constraints": [
+      "Use httponly cookies for refresh tokens, not localStorage",
+      "Max 300 lines per file"
+    ],
+    "decisions_made": [
+      "Chose PyJWT over python-jose for fewer dependencies",
+      "Redis for token blacklist instead of DB table (faster lookups)",
+      "Asymmetric RS256 keys so services can verify without signing key"
+    ]
+  },
+  "dependency_edges": {
+    "src/auth/tokens.py": {
+      "requires": "src/config.py",
+      "line": 15
+    },
+    "src/auth/routes.py": {
+      "requires": "src/auth/tokens.py",
+      "line": 8
+    }
+  },
+  "_meta": {
+    "project": "my-auth-service",
+    "generated_at": "2026-02-24T12:00:00",
+    "compression": "normal",
+    "cxdb_turns": 8,
+    "nlm_available": false
+  }
+}
